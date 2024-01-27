@@ -99,35 +99,21 @@ if __name__ == '__main__':
 
     words, bboxes, ner_tags, image_path = [], [], [], []
     for image, rows in images.items():
-        words_aux, ner_tags_aux, bboxes_aux = [], [], []
+        try:
+            word_list = [row.split('\t')[0].replace('\n', '') for row in files['train'][rows[0]:rows[-1]+1]]
+            ner_tag_list = [row.split('\t')[1].replace('\n', '') for row in files['train'][rows[0]:rows[-1]+1]]
+            bbox_list = [box.split('\t')[1].replace('\n', '') for box in files['train_box'][rows[0]:rows[-1]+1]]
 
-        for row in files['train'][rows[0]:rows[-1]+1]:
-            try:
-                word, ner_tag = row.strip().split('\t')
-                words_aux.append(word)
-                ner_tags_aux.append(ner_tag)
-            except IndexError:
-                # Log error and continue to the next row
-                traceback.print_exc()
-                continue
+            words.append(word_list)
+            ner_tags.append(ner_tag_list)
+            bboxes.append(bbox_list)
 
-        for box in files['train_box'][rows[0]:rows[-1]+1]:
-            try:
-                bbox = box.strip().split('\t')[1]
-                bboxes_aux.append(bbox)
-            except IndexError:
-                # Log error and continue to the next box
-                traceback.print_exc()
-                continue
-
-        words.append(words_aux)
-        ner_tags.append(ner_tags_aux)
-        bboxes.append(bboxes_aux)
-
-        if zip_dir_name:
-            image_path.append(f"/content/data/{image}")
-        else:
-            image_path.append(f"/content/data/{image}")
+            if zip_dir_name:
+                image_path.append(f"/content/data/{image}")
+            else:
+                image_path.append(f"/content/data/{image}")
+        except IndexError as e:
+            traceback.print_exc()
 
     labels = list(set([tag for doc_tag in ner_tags for tag in doc_tag]))
     id2label = {v: k for v, k in enumerate(labels)}
