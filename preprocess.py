@@ -8,6 +8,7 @@ from sklearn.model_selection import train_test_split
 from datasets import Features, Sequence, ClassLabel, Value, Array2D, Array3D, Dataset
 from datasets import Image as Img
 from PIL import Image
+import gc
 import traceback
 
 
@@ -97,16 +98,32 @@ if __name__ == '__main__':
             image_name = row.split('\t')[-1]
             images.setdefault(image_name.replace('\n', ''), []).append(i)
 
-    words, bboxes, ner_tags, image_path = [], [], [], []
+    def fix_bboxes(bboxes):
+        fixed_bboxes = []
+        for bbox in bboxes:
+            x0, y0, x1, y1 = map(int, bbox.split())
+            if x1 < x0:
+                x0, x1 = x1, x0
+                print("Correct BBOXES x0 x1 ****************")
+            if y1 < y0:
+                y0, y1 = y1, y0
+                print("Correct BBOXES y0 y1 -----------------")
+            fixed_bboxes.append(f"{x0} {y0} {x1} {y1}")
+        return fixed_bboxes
+
+    words, bboxes, ner_tags, image_path ,old_img_sizes = [], [], [], [], []
     for image, rows in images.items():
         try:
             word_list = [row.split('\t')[0].replace('\n', '') for row in files['train'][rows[0]:rows[-1]+1]]
             ner_tag_list = [row.split('\t')[1].replace('\n', '') for row in files['train'][rows[0]:rows[-1]+1]]
             bbox_list = [box.split('\t')[1].replace('\n', '') for box in files['train_box'][rows[0]:rows[-1]+1]]
 
+            fixed_bboxes = fix_bboxes(bbox_list)
             words.append(word_list)
             ner_tags.append(ner_tag_list)
-            bboxes.append(bbox_list)
+            bboxes.append(fixed_bboxes)
+
+            old_img_sizes.append(tuple(map(int,files['train_image'][rows[0]].split("\t")[-2].split(" "))))
 
             if zip_dir_name:
                 image_path.append(f"/content/data/{image}")
@@ -114,19 +131,67 @@ if __name__ == '__main__':
                 image_path.append(f"/content/data/{image}")
         except IndexError as e:
             traceback.print_exc()
-
+    print("Creating labels ---------------")
     labels = list(set([tag for doc_tag in ner_tags for tag in doc_tag]))
     id2label = {v: k for v, k in enumerate(labels)}
     label2id = {k: v for v, k in enumerate(labels)}
+    print("Create dataset dict ---------------")
+    dataset_dict = { }
+    dataset_dict["id"]= range(len(words))
+    dataset_dict["tokens"]= words
+    del words
 
-    dataset_dict = {
-        'id': range(len(words)),
-        'tokens': words,
-        'bboxes': [[list(map(int, bbox.split())) for bbox in doc] for doc in bboxes],
-        'ner_tags': [[label2id[tag] for tag in ner_tag] for ner_tag in ner_tags],
-        'image': [Image.open(path).convert("RGB") for path in image_path]
-    }
 
+    dataset_dict["ner_tags"]= [[label2id[tag] for tag in ner_tag] for ner_tag in ner_tags]
+
+    del ner_tags
+    from typing import List
+    from PIL import Image
+
+    def scale_images(paths: List[str]):
+        scaled_images = []
+
+        for path in paths:
+            img = Image.open(path).convert("RGB")
+            img.thumbnail((1000, 1000), Image.ANTIALIAS)
+            scaled_images.append(img)
+
+        return scaled_images
+    dataset_dict["image"] = scale_images(image_path)
+
+    def normalize_bbox(bbox, old_s, new_s):
+        ow, oh = old_s
+        nw, nh = new_s
+        n_box = []
+        n_box.append(int(bbox[0]*nw/ow))
+        n_box.append(int(bbox[1]*nh/oh))
+        n_box.append(int(bbox[2]*nw/ow))
+        n_box.append(int(bbox[3]*nh/oh))
+        return n_box
+    def no_negative_values(bbox):
+        return not ( bbox[0] < 0 or bbox[1] < 0 or bbox[2] < 0 or bbox[3] < 0 )
+    dataset_dict["bboxes"]= []
+    words_to_be_deleted = []
+    for index,(old_size,img,doc) in enumerate(zip(old_img_sizes, dataset_dict["image"], bboxes)):
+        new_size = img.size
+        bbox_aux = []
+        for ind,bbox in enumerate(doc):
+            box = list(map(int, bbox.split()))
+            if no_negative_values(box):
+                bbox_aux.append(normalize_bbox(box, old_size, new_size))
+            else:
+                print((index,ind),box)
+                words_to_be_deleted.append((index,ind))
+        dataset_dict["bboxes"].append(bbox_aux)
+
+    ### delete words 
+    for index,ind in words_to_be_deleted:
+        del dataset_dict["tokens"][index][ind]
+
+    del old_img_sizes
+    del bboxes
+    gc.collect()
+    print("Create features ---------------")
     #raw features
     features = Features({
         'id': Value(dtype='string', id=None),
@@ -135,9 +200,15 @@ if __name__ == '__main__':
         'ner_tags': Sequence(feature=ClassLabel(num_classes=len(labels), names=labels, names_file=None, id=None), length=-1, id=None),
         'image': Img(decode=True, id=None)
     })
-
+    print("Create the full_data_set ----------")
     full_data_set = Dataset.from_dict(dataset_dict, features=features)
+    print("Split the dataset ----------")
     dataset = full_data_set.train_test_split(test_size=TEST_SIZE)
+    del dataset_dict
+    del full_data_set
+    gc.collect()
+
+    print("Start filtering ----------")
     dataset["train"] = dataset["train"].filter(filter_out_unannotated)
     processor = AutoProcessor.from_pretrained(
         "microsoft/layoutlmv3-base", apply_ocr=False)
@@ -173,7 +244,7 @@ if __name__ == '__main__':
 #         label2id = {v: k for k, v in enumerate(label_list)}
 #     num_labels = len(label_list)
 
-    
+
 
     # we need to define custom features for `set_format` (used later on) to work properly
     features = Features({
